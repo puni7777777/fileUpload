@@ -200,6 +200,7 @@ export default function Home() {
         "-ss", startStr,
         "-to", endStr,
         "-i", inputName,
+        "-map_metadata", "-1",
         "-c", "copy",
         "-avoid_negative_ts", "make_zero",
         "-movflags", "+faststart",
@@ -213,6 +214,7 @@ export default function Home() {
           "-ss", startStr,
           "-to", endStr,
           "-i", inputName,
+          "-map_metadata", "-1",
           "-preset", "ultrafast",
           "-movflags", "+faststart",
           outputName
