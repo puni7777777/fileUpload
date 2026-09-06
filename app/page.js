@@ -9,6 +9,10 @@ import { fetchFile, toBlobURL } from "@ffmpeg/util";
 export default function Home() {
   const ffmpegRef = useRef(null);
   const fileInputRef = useRef(null);
+  const videoRef = useRef(null);
+  const isTrimmedRef = useRef(false);
+  const createdUrlsRef = useRef([]);
+
   const [fileInput, setFileInput] = useState();
   const [videoSrc, setVideoSrc] = useState(null);
   const [videoDuration, setVideoDuration] = useState("");
@@ -19,13 +23,23 @@ export default function Home() {
   const [startTime, setStartTime] = useState('00:00:00:00');
   const [endTime, setEndTime] = useState('00:00:00:00');
 
+  // Clean up object URLs only when component unmounts to prevent premature revocation
   useEffect(() => {
     return () => {
-      if (videoSrc) {
-        URL.revokeObjectURL(videoSrc);
-      }
+      createdUrlsRef.current.forEach((url) => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch (e) {}
+      });
+      createdUrlsRef.current = [];
     };
-  }, [videoSrc]);
+  }, []);
+
+  const createSafeObjectUrl = (blobOrFile) => {
+    const url = URL.createObjectURL(blobOrFile);
+    createdUrlsRef.current.push(url);
+    return url;
+  };
 
   const loadFFmpeg = async () => {
     if (ffmpegRef.current && ffmpegRef.current.loaded) {
@@ -53,11 +67,10 @@ export default function Home() {
   const handleFileChange = (e) => {
     const file = e.target.files?.[0];
     if (file) {
-      if (videoSrc) {
-        URL.revokeObjectURL(videoSrc);
-      }
+      isTrimmedRef.current = false;
       setFileInput(file);
-      setVideoSrc(URL.createObjectURL(file));
+      const url = createSafeObjectUrl(file);
+      setVideoSrc(url);
       setTrimmedBlob(null);
       setError(null);
       setUpload(null);
@@ -68,12 +81,14 @@ export default function Home() {
     const dur = e.target.duration;
     if (dur && !isNaN(dur)) {
       setVideoDuration(`${dur.toFixed(2)}s`);
-      const totalSecs = Math.floor(dur);
-      const hours = String(Math.floor(totalSecs / 3600)).padStart(2, '0');
-      const mins = String(Math.floor((totalSecs % 3600) / 60)).padStart(2, '0');
-      const secs = String(totalSecs % 60).padStart(2, '0');
-      const frames = String(Math.floor((dur % 1) * 100)).padStart(2, '0');
-      setEndTime(`${hours}:${mins}:${secs}:${frames}`);
+      if (!isTrimmedRef.current && endTime === '00:00:00:00') {
+        const totalSecs = Math.floor(dur);
+        const hours = String(Math.floor(totalSecs / 3600)).padStart(2, '0');
+        const mins = String(Math.floor((totalSecs % 3600) / 60)).padStart(2, '0');
+        const secs = String(totalSecs % 60).padStart(2, '0');
+        const frames = String(Math.floor((dur % 1) * 100)).padStart(2, '0');
+        setEndTime(`${hours}:${mins}:${secs}:${frames}`);
+      }
     }
   };
 
@@ -180,21 +195,26 @@ export default function Home() {
 
       await ffmpeg.writeFile(inputName, await fetchFile(fileInput));
 
-      // Fast stream copy attempt first
+      // Key fix: "-ss" and "-to" before "-i", along with "-avoid_negative_ts make_zero" and "-movflags +faststart"
       let ret = await ffmpeg.exec([
-        "-i", inputName,
         "-ss", startStr,
         "-to", endStr,
+        "-i", inputName,
         "-c", "copy",
+        "-avoid_negative_ts", "make_zero",
+        "-movflags", "+faststart",
         outputName
       ]);
 
-      // Fallback to re-encoding if stream copy fails
+      // Fallback to ultrafast encoding if stream copy fails
       if (ret !== 0) {
+        console.warn("Stream copy failed, falling back to encoding...");
         ret = await ffmpeg.exec([
-          "-i", inputName,
           "-ss", startStr,
           "-to", endStr,
+          "-i", inputName,
+          "-preset", "ultrafast",
+          "-movflags", "+faststart",
           outputName
         ]);
       }
@@ -204,13 +224,18 @@ export default function Home() {
       }
 
       const data = await ffmpeg.readFile(outputName);
-      const blob = new Blob([data.buffer], { type: "video/mp4" });
+      
+      // Ensure only the exact binary slice is converted to a Blob
+      const fileBytes = data.buffer.slice(
+        data.byteOffset,
+        data.byteOffset + data.byteLength
+      );
+      const blob = new Blob([fileBytes], { type: "video/mp4" });
+
+      isTrimmedRef.current = true;
       setTrimmedBlob(blob);
 
-      if (videoSrc) {
-        URL.revokeObjectURL(videoSrc);
-      }
-      const trimmedUrl = URL.createObjectURL(blob);
+      const trimmedUrl = createSafeObjectUrl(blob);
       setVideoSrc(trimmedUrl);
 
       try {
@@ -237,14 +262,13 @@ export default function Home() {
       return;
     }
     try {
-      const url = window.URL.createObjectURL(fileToDownload);
+      const url = createSafeObjectUrl(fileToDownload);
       const a = document.createElement('a');
       a.href = url;
       a.download = trimmedBlob ? `trimmed_${fileInput.name}` : fileInput.name;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
     } catch (error) {
       console.error("Error downloading file: " + error.message);
       setError(error.message);
@@ -255,8 +279,11 @@ export default function Home() {
     <div className="flex flex-col justify-center items-center h-screen font-mono gap-3">
       <div className="flex flex-col items-center">
         {fileInput && <video
+          key={videoSrc}
+          ref={videoRef}
           src={videoSrc}
           controls
+          playsInline
           width="350"
           onLoadedMetadata={handleLoadedMetadata}>
         </video>
