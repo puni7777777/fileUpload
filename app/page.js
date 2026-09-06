@@ -23,6 +23,12 @@ export default function Home() {
   const [startTime, setStartTime] = useState('00:00:00:00');
   const [endTime, setEndTime] = useState('00:00:00:00');
 
+  // Supported common video extensions
+  const validExtensions = [
+    'mp4', 'm4v', 'webm', 'mov', 'qt', 'mkv', 'avi', 'wmv', 'asf', 
+    'flv', 'ts', 'mts', 'm2ts', '3gp', '3g2', 'ogv', 'ogg', 'mpg', 'mpeg', 'vob'
+  ];
+
   // Clean up object URLs only when component unmounts to prevent premature revocation
   useEffect(() => {
     return () => {
@@ -67,6 +73,16 @@ export default function Home() {
   const handleFileChange = (e) => {
     const file = e.target.files?.[0];
     if (file) {
+      const ext = file.name.split('.').pop()?.toLowerCase() || '';
+      const isVideo = file.type?.startsWith('video/') || validExtensions.includes(ext);
+
+      if (!isVideo) {
+        setError("Please select a valid video file");
+        setFileInput(null);
+        setVideoSrc(null);
+        return;
+      }
+
       isTrimmedRef.current = false;
       setFileInput(file);
       const url = createSafeObjectUrl(file);
@@ -74,6 +90,7 @@ export default function Home() {
       setTrimmedBlob(null);
       setError(null);
       setUpload(null);
+      setVideoDuration("");
     }
   };
 
@@ -89,6 +106,12 @@ export default function Home() {
         const frames = String(Math.floor((dur % 1) * 100)).padStart(2, '0');
         setEndTime(`${hours}:${mins}:${secs}:${frames}`);
       }
+    }
+  };
+
+  const handleVideoError = () => {
+    if (!isTrimmedRef.current && fileInput) {
+      setVideoDuration("Preview not supported natively for this format; trim it to standard MP4!");
     }
   };
 
@@ -147,8 +170,11 @@ export default function Home() {
       return;
     }
 
-    if (!fileInput.name.toLowerCase().endsWith('.mp4')) {
-      setError("Only mp4 files are allowed");
+    const ext = fileInput.name.split('.').pop()?.toLowerCase() || '';
+    const isVideo = fileInput.type?.startsWith('video/') || validExtensions.includes(ext);
+
+    if (!isVideo) {
+      setError("Please select a valid video file");
       return;
     }
 
@@ -190,44 +216,65 @@ export default function Home() {
       const startStr = secondsToFFmpegTime(startSec);
       const endStr = secondsToFFmpegTime(endSec);
 
-      const inputName = "input.mp4";
+      const fileExt = fileInput.name.split('.').pop()?.toLowerCase() || 'mp4';
+      const inputName = `input.${fileExt}`;
       const outputName = "output.mp4";
 
       await ffmpeg.writeFile(inputName, await fetchFile(fileInput));
 
-      // Key fix: "-ss" and "-to" before "-i", along with "-avoid_negative_ts make_zero" and "-movflags +faststart"
-      let ret = await ffmpeg.exec([
-        "-ss", startStr,
-        "-to", endStr,
-        "-i", inputName,
-        "-map_metadata", "-1",
-        "-c", "copy",
-        "-avoid_negative_ts", "make_zero",
-        "-movflags", "+faststart",
-        outputName
-      ]);
+      let ret = -1;
+      const canAttemptCopy = ['mp4', 'm4v', 'mov'].includes(fileExt);
 
-      // Fallback to ultrafast encoding if stream copy fails
-      if (ret !== 0) {
-        console.warn("Stream copy failed, falling back to encoding...");
+      // Try fast stream copy first for compatible containers
+      if (canAttemptCopy) {
         ret = await ffmpeg.exec([
           "-ss", startStr,
           "-to", endStr,
           "-i", inputName,
           "-map_metadata", "-1",
-          "-preset", "ultrafast",
+          "-c", "copy",
+          "-avoid_negative_ts", "make_zero",
           "-movflags", "+faststart",
           outputName
         ]);
       }
 
+      // If not an MP4 container, or if stream copy fails,
+      // re-encode to universal web-compatible H.264 + AAC MP4
       if (ret !== 0) {
-        throw new Error("FFmpeg failed to trim video");
+        console.log("Transcoding clip to standard web MP4...");
+        ret = await ffmpeg.exec([
+          "-ss", startStr,
+          "-to", endStr,
+          "-i", inputName,
+          "-map_metadata", "-1",
+          "-c:v", "libx264",
+          "-preset", "ultrafast",
+          "-c:a", "aac",
+          "-movflags", "+faststart",
+          outputName
+        ]);
+
+        if (ret !== 0) {
+          ret = await ffmpeg.exec([
+            "-ss", startStr,
+            "-to", endStr,
+            "-i", inputName,
+            "-map_metadata", "-1",
+            "-preset", "ultrafast",
+            "-movflags", "+faststart",
+            outputName
+          ]);
+        }
+      }
+
+      if (ret !== 0) {
+        throw new Error("FFmpeg failed to process and trim video");
       }
 
       const data = await ffmpeg.readFile(outputName);
-      
-      // Ensure only the exact binary slice is converted to a Blob
+
+      // Ensure exact binary slice is used for Blob
       const fileBytes = data.buffer.slice(
         data.byteOffset,
         data.byteOffset + data.byteLength
@@ -267,7 +314,8 @@ export default function Home() {
       const url = createSafeObjectUrl(fileToDownload);
       const a = document.createElement('a');
       a.href = url;
-      a.download = trimmedBlob ? `trimmed_${fileInput.name}` : fileInput.name;
+      const baseName = fileInput.name.substring(0, fileInput.name.lastIndexOf('.')) || fileInput.name;
+      a.download = trimmedBlob ? `trimmed_${baseName}.mp4` : fileInput.name;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -287,7 +335,8 @@ export default function Home() {
           controls
           playsInline
           width="350"
-          onLoadedMetadata={handleLoadedMetadata}>
+          onLoadedMetadata={handleLoadedMetadata}
+          onError={handleVideoError}>
         </video>
         }
         {fileInput && <p>{videoDuration}</p>}
@@ -297,6 +346,7 @@ export default function Home() {
           type="file"
           id="file"
           name="file"
+          accept="video/*,.mp4,.m4v,.mov,.webm,.mkv,.avi,.wmv,.flv,.ts,.mts,.3gp,.ogv"
           className="w-full border border-slate-200 rounded-lg py-3 px-5 outline-none	bg-transparent"
           onChange={handleFileChange}
           ref={fileInputRef}
